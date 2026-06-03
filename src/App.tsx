@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Command } from '@tauri-apps/plugin-shell';
 import { FolderOpen, RefreshCw, Terminal as TerminalIcon, User, UserX, Search, Rocket, X, GitBranch, ChevronDown, Settings, AlertCircle, Maximize2, Minimize2, RotateCcw, History } from 'lucide-react';
+import { version as APP_VERSION } from '../package.json';
 import { Worker } from './components/WorkerCard';
 import FolderGroup from './components/FolderGroup';
 import Terminal, { TerminalHandle } from './components/Terminal';
@@ -12,6 +13,15 @@ import ErrorLogPanel, { AppError } from './components/ErrorLogPanel';
 import DeployHistoryPanel, { DeployHistoryEntry } from './components/DeployHistoryPanel';
 
 
+interface TerminalTab {
+  id: string;
+  label: string;
+  type: 'main' | 'tail';
+}
+
+const MAIN_TAB: TerminalTab = { id: 'main', label: 'Terminal', type: 'main' };
+const TAB_BAR_HEIGHT = 32;
+
 function App() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(false);
@@ -20,7 +30,7 @@ function App() {
   const [selectedShell, setSelectedShell] = useState(localStorage.getItem('selected_shell') || 'powershell');
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [wranglerVersion, setWranglerVersion] = useState<string | null>(null);
-  const [processRunning, setProcessRunning] = useState(false);
+  const [runningTabs, setRunningTabs] = useState<Set<string>>(new Set());
   const TERMINAL_DEFAULT_HEIGHT = 280;
   const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT);
   const [terminalMaximized, setTerminalMaximized] = useState(false);
@@ -60,7 +70,10 @@ function App() {
   const isDragging = useRef(false);
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
-  const terminalRef = useRef<TerminalHandle>(null);
+  const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
+  const pendingTailRef = useRef<{ tabId: string; command: string; cwd?: string } | null>(null);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([MAIN_TAB]);
+  const [activeTabId, setActiveTabId] = useState<string>('main');
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     isDragging.current = true;
@@ -197,10 +210,10 @@ function App() {
     try {
       const results: Worker[] = await invoke('scan_workers', { basePath: path });
       setWorkers(results);
-      terminalRef.current?.write(`\r\n\x1b[32mScan complete. Found ${results.length} workers.\x1b[0m\r\n`);
+      terminalRefs.current['main']?.write(`\r\n\x1b[32mScan complete. Found ${results.length} workers.\x1b[0m\r\n`);
     } catch (err) {
       console.error(err);
-      terminalRef.current?.write(`\r\n\x1b[31mError scanning: ${err}\x1b[0m\r\n`);
+      terminalRefs.current['main']?.write(`\r\n\x1b[31mError scanning: ${err}\x1b[0m\r\n`);
       pushError('scan_workers', 'error', `Error al escanear directorio: ${path}`, String(err));
     } finally {
       setLoading(false);
@@ -245,11 +258,20 @@ function App() {
   };
 
   const handleLogs = (worker: Worker, env?: string, format: string = 'pretty') => {
+    const tabId = `tail:${worker.path}`;
+    if (terminalTabs.some(t => t.id === tabId)) {
+      setActiveTabId(tabId);
+      requestAnimationFrame(() => terminalRefs.current[tabId]?.fit());
+      return;
+    }
     const envFlag = env ? ` --env ${env}` : '';
-    terminalRef.current?.executeCommand(
-      `npx wrangler tail${envFlag} --format ${format} --config=${worker.path}`,
-      resolveCwd(worker)
-    );
+    pendingTailRef.current = {
+      tabId,
+      command: `npx wrangler tail${envFlag} --format ${format} --config=${worker.path}`,
+      cwd: resolveCwd(worker),
+    };
+    setTerminalTabs(prev => [...prev, { id: tabId, label: worker.name, type: 'tail' }]);
+    setActiveTabId(tabId);
   };
 
   const handleShellChange = (shell: string) => {
@@ -258,7 +280,8 @@ function App() {
   };
 
   const handleLogin = () => {
-    terminalRef.current?.executeCommand('npx wrangler login');
+    setActiveTabId('main');
+    terminalRefs.current['main']?.executeCommand('npx wrangler login');
   };
 
   const handleOpenEditor = async (worker: Worker) => {
@@ -300,9 +323,10 @@ function App() {
       label: worker.name,
     }));
     setDeployTarget(null);
+    setActiveTabId('main');
     setDeployProgress({ current: 0, total: commands.length });
     const startedAt = new Date();
-    const results = await terminalRef.current?.executeSequential(commands, (done, total) => {
+    const results = await terminalRefs.current['main']?.executeSequential(commands, (done: number, total: number) => {
       setDeployProgress({ current: done, total });
     }) ?? [];
     const endedAt = new Date();
@@ -356,12 +380,36 @@ function App() {
     else { setCurrentBranch(null); setBranches([]); }
   }, [basePath, fetchBranchInfo]);
 
+  useEffect(() => {
+    const pending = pendingTailRef.current;
+    if (!pending) return;
+    const handle = terminalRefs.current[pending.tabId];
+    if (handle) {
+      pendingTailRef.current = null;
+      handle.executeCommand(pending.command, pending.cwd);
+    }
+  });
+
   const handleBranchSwitch = async (branch: string) => {
     if (!basePath || branch === currentBranch) return;
     setBranchMenuOpen(false);
-    await terminalRef.current?.executeCommand(`git checkout ${branch}`, basePath);
+    setActiveTabId('main');
+    await terminalRefs.current['main']?.executeCommand(`git checkout ${branch}`, basePath);
     fetchBranchInfo(basePath);
     scanFolder(basePath);
+  };
+
+  const switchToTab = (tabId: string) => {
+    setActiveTabId(tabId);
+    requestAnimationFrame(() => terminalRefs.current[tabId]?.fit());
+  };
+
+  const closeTab = (tabId: string) => {
+    terminalRefs.current[tabId]?.kill();
+    delete terminalRefs.current[tabId];
+    setRunningTabs(prev => { const next = new Set(prev); next.delete(tabId); return next; });
+    setTerminalTabs(prev => prev.filter(t => t.id !== tabId));
+    setActiveTabId(prev => prev === tabId ? 'main' : prev);
   };
 
   const filteredWorkers = workers.filter(w =>
@@ -402,6 +450,9 @@ function App() {
                   wrangler v{wranglerVersion}
                 </span>
               )}
+              <span className="px-2 py-0.5 rounded-full bg-slate-700/50 border border-slate-600/30 text-[10px] font-bold text-slate-400">
+                v{APP_VERSION}
+              </span>
             </div>
             {/* Row 2: current path + branch */}
             {basePath && (
@@ -641,23 +692,65 @@ function App() {
       )}
 
       {/* Terminal Area */}
-      <div className="relative w-full shrink-0" style={{ height: terminalHeight }}>
-        {processRunning && (
-          <button
-            onClick={() => terminalRef.current?.kill()}
-            className="absolute bottom-3 right-4 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500 text-red-400 hover:text-white border border-red-500/30 text-[11px] font-bold transition-all shadow-lg"
-          >
-            <span className="w-1.5 h-1.5 rounded-sm bg-current" />
-            Stop
-          </button>
-        )}
-        <Terminal
-          ref={terminalRef}
-          selectedShell={selectedShell}
-          onShellChange={handleShellChange}
-          onProcessChange={setProcessRunning}
-          height={terminalHeight}
-        />
+      <div className="relative w-full shrink-0 flex flex-col" style={{ height: terminalHeight }}>
+        {/* Tab bar */}
+        <div className="h-8 flex items-stretch bg-slate-950 border-t border-slate-800 overflow-x-auto shrink-0">
+          {terminalTabs.map(tab => {
+            const isActive = tab.id === activeTabId;
+            const isRunning = runningTabs.has(tab.id);
+            return (
+              <div
+                key={tab.id}
+                title={tab.label}
+                className={`flex items-center gap-1.5 px-3 text-[10px] font-bold border-r border-slate-800 cursor-pointer transition-colors shrink-0 select-none ${
+                  isActive ? 'bg-slate-900 text-slate-200' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900/50'
+                }`}
+                onClick={() => switchToTab(tab.id)}
+              >
+                {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse shrink-0" />}
+                <span className="truncate max-w-[120px]">{tab.label}</span>
+                {tab.type === 'tail' && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                    className="ml-1 text-slate-600 hover:text-red-400 transition-colors shrink-0"
+                  >
+                    <X size={9} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {/* Terminals */}
+        <div className="flex-1 relative min-h-0">
+          {terminalTabs.map(tab => (
+            <div key={tab.id} style={{ display: activeTabId === tab.id ? 'block' : 'none', height: '100%' }}>
+              <Terminal
+                ref={(handle) => { terminalRefs.current[tab.id] = handle; }}
+                selectedShell={selectedShell}
+                onShellChange={handleShellChange}
+                onProcessChange={(running) => {
+                  setRunningTabs(prev => {
+                    const next = new Set(prev);
+                    running ? next.add(tab.id) : next.delete(tab.id);
+                    return next;
+                  });
+                }}
+                height={terminalHeight - TAB_BAR_HEIGHT}
+                hideBorderTop
+              />
+            </div>
+          ))}
+          {runningTabs.has(activeTabId) && (
+            <button
+              onClick={() => terminalRefs.current[activeTabId]?.kill()}
+              className="absolute bottom-3 right-4 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500 text-red-400 hover:text-white border border-red-500/30 text-[11px] font-bold transition-all shadow-lg"
+            >
+              <span className="w-1.5 h-1.5 rounded-sm bg-current" />
+              Stop
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Deployment confirmation modal */}

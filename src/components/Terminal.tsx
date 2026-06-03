@@ -16,6 +16,7 @@ export interface TerminalHandle {
   executeSequential: (commands: { command: string; cwd?: string; label?: string }[], onProgress?: (done: number, total: number) => void) => Promise<CommandResult[]>;
   write: (text: string) => void;
   kill: () => Promise<void>;
+  fit: () => void;
 }
 
 interface TerminalProps {
@@ -23,9 +24,10 @@ interface TerminalProps {
   onShellChange: (shell: string) => void;
   onProcessChange?: (running: boolean) => void;
   height: number;
+  hideBorderTop?: boolean;
 }
 
-const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onShellChange, onProcessChange, height }, ref) => {
+const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onShellChange, onProcessChange, height, hideBorderTop }, ref) => {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -204,6 +206,8 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onS
         xtermRef.current?.write(text);
       },
 
+      fit: () => fitAddonRef.current?.fit(),
+
       kill: async () => {
         if (activeChildRef.current) {
           const pid = activeChildRef.current.pid;
@@ -281,7 +285,7 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onS
   }, [height]);
 
   return (
-    <div className="bg-slate-950 border-t border-slate-800 overflow-hidden flex flex-col" style={{ height }}>
+    <div className={`bg-slate-950 overflow-hidden flex flex-col ${hideBorderTop ? '' : 'border-t border-slate-800'}`} style={{ height }}>
       {/* Toolbar */}
       <div className="h-9 flex items-center justify-between px-4 border-b border-slate-800/80 shrink-0 gap-4">
         {/* Left: label */}
