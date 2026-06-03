@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio/**)",
+      "PowerShell(winget list --id Microsoft.VisualStudio.2022.BuildTools 2>$null)",
+      "PowerShell(winget list --id Microsoft.WindowsSDK 2>$null)",
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\.rustup\" -Recurse -Filter \"rc.exe\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Select-Object -First 3)"
+    ]
+  }
+}

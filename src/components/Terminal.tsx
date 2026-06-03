@@ -6,9 +6,14 @@ import '@xterm/xterm/css/xterm.css';
 import { Command } from '@tauri-apps/plugin-shell';
 import { Trash2, Search, ChevronUp, ChevronDown, X, FolderSearch, ChevronsDown } from 'lucide-react';
 
+export interface CommandResult {
+  label?: string;
+  success: boolean;
+}
+
 export interface TerminalHandle {
   executeCommand: (commandStr: string, cwd?: string) => Promise<void>;
-  executeSequential: (commands: { command: string; cwd?: string; label?: string }[], onProgress?: (done: number, total: number) => void) => Promise<void>;
+  executeSequential: (commands: { command: string; cwd?: string; label?: string }[], onProgress?: (done: number, total: number) => void) => Promise<CommandResult[]>;
   write: (text: string) => void;
   kill: () => Promise<void>;
 }
@@ -97,9 +102,9 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onS
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [searchOpen, toggleSearch]);
 
-  const runCommandInternal = useCallback((commandStr: string, cwd?: string): Promise<void> => {
+  const runCommandInternal = useCallback((commandStr: string, cwd?: string): Promise<number> => {
     const term = xtermRef.current;
-    if (!term) return Promise.resolve();
+    if (!term) return Promise.resolve(-1);
 
     const isWrangler = commandStr.startsWith('npx wrangler') || commandStr.startsWith('npx.cmd wrangler');
 
@@ -119,19 +124,19 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onS
 
     const command = Command.create(program, args, { cwd });
 
-    return new Promise<void>((resolve) => {
+    return new Promise<number>((resolve) => {
       command.on('close', (data) => {
         term.writeln(`\r\n\x1b[32mProcess exited with code ${data.code}\x1b[0m`);
         activeChildRef.current = null;
         onProcessChange?.(false);
-        resolve();
+        resolve(data.code ?? -1);
       });
 
       command.on('error', (error) => {
         term.writeln(`\r\n\x1b[31mError: ${error}\x1b[0m`);
         activeChildRef.current = null;
         onProcessChange?.(false);
-        resolve();
+        resolve(-1);
       });
 
       const writeAndLock = (text: string) => {
@@ -160,7 +165,7 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onS
         .catch((err) => {
           term.writeln(`\r\n\x1b[31mFailed to execute: ${err}\x1b[0m`);
           onProcessChange?.(false);
-          resolve();
+          resolve(-1);
         });
     });
   }, [selectedShell, onProcessChange]);
@@ -178,18 +183,21 @@ const Terminal = forwardRef<TerminalHandle, TerminalProps>(({ selectedShell, onS
         await runCommandInternal(commandStr, cwd);
       },
 
-      executeSequential: async (commands: { command: string; cwd?: string; label?: string }[], onProgress?: (done: number, total: number) => void) => {
+      executeSequential: async (commands: { command: string; cwd?: string; label?: string }[], onProgress?: (done: number, total: number) => void): Promise<CommandResult[]> => {
+        const results: CommandResult[] = [];
         for (let i = 0; i < commands.length; i++) {
           const { command, cwd, label } = commands[i];
-          if (!xtermRef.current) return;
+          if (!xtermRef.current) break;
           if (label) {
             xtermRef.current.writeln(`\r\n\x1b[35m▶ ${label}\x1b[0m`);
           }
           xtermRef.current.writeln(`\r\n\x1b[36m$ ${command}\x1b[0m`);
-          await runCommandInternal(command, cwd);
+          const exitCode = await runCommandInternal(command, cwd);
+          results.push({ label, success: exitCode === 0 });
           onProgress?.(i + 1, commands.length);
         }
         xtermRef.current?.writeln('\r\n\x1b[32m✓ Multi-deploy finalizado.\x1b[0m');
+        return results;
       },
 
       write: (text: string) => {

@@ -2,14 +2,14 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Command } from '@tauri-apps/plugin-shell';
-import { FolderOpen, RefreshCw, Terminal as TerminalIcon, User, UserX, Search, Rocket, X, GitBranch, ChevronDown, Settings, AlertCircle, Maximize2, Minimize2, RotateCcw } from 'lucide-react';
-import logo from './assets/logo.png';
+import { FolderOpen, RefreshCw, Terminal as TerminalIcon, User, UserX, Search, Rocket, X, GitBranch, ChevronDown, Settings, AlertCircle, Maximize2, Minimize2, RotateCcw, History } from 'lucide-react';
 import { Worker } from './components/WorkerCard';
 import FolderGroup from './components/FolderGroup';
 import Terminal, { TerminalHandle } from './components/Terminal';
 import MultiDeployModal, { WorkerDeployConfig } from './components/MultiDeployModal';
 import DeploySettingsModal, { DEFAULT_DEPLOY_TEMPLATE } from './components/DeploySettingsModal';
 import ErrorLogPanel, { AppError } from './components/ErrorLogPanel';
+import DeployHistoryPanel, { DeployHistoryEntry } from './components/DeployHistoryPanel';
 
 
 function App() {
@@ -44,6 +44,18 @@ function App() {
   const [appErrors, setAppErrors] = useState<AppError[]>([]);
   const [showErrorLog, setShowErrorLog] = useState(false);
   const errorIdRef = useRef(0);
+  const [deployHistory, setDeployHistory] = useState<DeployHistoryEntry[]>(() => {
+    try {
+      const saved = localStorage.getItem('deploy_history');
+      if (!saved) return [];
+      return JSON.parse(saved).map((e: DeployHistoryEntry & { startedAt: string; endedAt: string }) => ({
+        ...e,
+        startedAt: new Date(e.startedAt),
+        endedAt: new Date(e.endedAt),
+      }));
+    } catch { return []; }
+  });
+  const [showDeployHistory, setShowDeployHistory] = useState(false);
   const authCheckActiveRef = useRef(false);
   const isDragging = useRef(false);
   const dragStartY = useRef(0);
@@ -235,7 +247,7 @@ function App() {
   const handleLogs = (worker: Worker, env?: string, format: string = 'pretty') => {
     const envFlag = env ? ` --env ${env}` : '';
     terminalRef.current?.executeCommand(
-      `npx wrangler tail${envFlag} --format ${format}`,
+      `npx wrangler tail${envFlag} --format ${format} --config=${worker.path}`,
       resolveCwd(worker)
     );
   };
@@ -289,9 +301,27 @@ function App() {
     }));
     setDeployTarget(null);
     setDeployProgress({ current: 0, total: commands.length });
-    await terminalRef.current?.executeSequential(commands, (done, total) => {
+    const startedAt = new Date();
+    const results = await terminalRef.current?.executeSequential(commands, (done, total) => {
       setDeployProgress({ current: done, total });
+    }) ?? [];
+    const endedAt = new Date();
+    const entry: DeployHistoryEntry = {
+      id: Date.now(),
+      startedAt,
+      endedAt,
+      workers: configs.map(({ worker }, i) => ({
+        name: worker.name,
+        success: results[i]?.success ?? false,
+        command: commands[i].command,
+      })),
+    };
+    setDeployHistory(prev => {
+      const next = [...prev, entry].slice(-50);
+      localStorage.setItem('deploy_history', JSON.stringify(next));
+      return next;
     });
+    await new Promise(resolve => setTimeout(resolve, 2500));
     setDeployProgress(null);
   };
 
@@ -430,6 +460,19 @@ function App() {
 
         {/* Actions */}
         <div className="flex items-center gap-3">
+          {/* Deploy history button */}
+          <button
+            onClick={() => setShowDeployHistory(v => !v)}
+            className={`relative p-2 rounded-lg transition-colors ${showDeployHistory ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-indigo-400'}`}
+            title="Deploy history"
+          >
+            <History size={18} />
+            {deployHistory.length > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-indigo-500 text-[9px] font-bold text-white flex items-center justify-center">
+                {deployHistory.length > 99 ? '99+' : deployHistory.length}
+              </span>
+            )}
+          </button>
           {/* Error log button */}
           <button
             onClick={() => setShowErrorLog(v => !v)}
@@ -624,6 +667,23 @@ function App() {
           selectedEnv={deployTarget.env}
           onConfirm={handleConfirmDeploy}
           onCancel={() => setDeployTarget(null)}
+        />
+      )}
+
+      {/* Deploy history panel */}
+      {showDeployHistory && (
+        <DeployHistoryPanel
+          history={deployHistory}
+          onDelete={(id) => setDeployHistory(prev => {
+            const next = prev.filter(e => e.id !== id);
+            localStorage.setItem('deploy_history', JSON.stringify(next));
+            return next;
+          })}
+          onClear={() => {
+            setDeployHistory([]);
+            localStorage.removeItem('deploy_history');
+          }}
+          onClose={() => setShowDeployHistory(false)}
         />
       )}
 
